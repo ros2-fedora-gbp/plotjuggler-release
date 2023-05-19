@@ -76,7 +76,6 @@ MainWindow::MainWindow(const QCommandLineParser& commandline_parser, QWidget* pa
   , _streaming_shortcut(QKeySequence(Qt::CTRL + Qt::Key_Space), this)
   , _playback_shotcut(Qt::Key_Space, this)
   , _minimized(false)
-  , _message_parser_factory(new MessageParserFactory)
   , _active_streamer_plugin(nullptr)
   , _disable_undo_logging(false)
   , _tracker_time(0)
@@ -86,6 +85,7 @@ MainWindow::MainWindow(const QCommandLineParser& commandline_parser, QWidget* pa
   , _recent_layout_files(new QMenu())
 {
   QLocale::setDefault(QLocale::c());  // set as default
+  setAcceptDrops(true);
 
   _test_option = commandline_parser.isSet("test");
   _autostart_publishers = commandline_parser.isSet("publish");
@@ -121,11 +121,18 @@ MainWindow::MainWindow(const QCommandLineParser& commandline_parser, QWidget* pa
       _skin_path = path.absolutePath();
     }
   }
-  QFile fileTitle(_skin_path + "/mainwindow_title.txt");
-  if (fileTitle.open(QIODevice::ReadOnly))
+  if (commandline_parser.isSet("window_title"))
   {
-    QString title = fileTitle.readAll().trimmed();
-    setWindowTitle(title);
+    setWindowTitle(commandline_parser.value("window_title"));
+  }
+  else
+  {
+    QFile fileTitle(_skin_path + "/mainwindow_title.txt");
+    if (fileTitle.open(QIODevice::ReadOnly))
+    {
+      QString title = fileTitle.readAll().trimmed();
+      setWindowTitle(title);
+    }
   }
 
   QSettings settings;
@@ -360,11 +367,17 @@ MainWindow::MainWindow(const QCommandLineParser& commandline_parser, QWidget* pa
   loadStyleSheet(tr(":/resources/stylesheet_%1.qss").arg(theme));
 
   // builtin messageParsers
-  _message_parser_factory->insert({ "JSON", std::make_shared<JSON_ParserCreator>() });
-  _message_parser_factory->insert({ "CBOR", std::make_shared<CBOR_ParserCreator>() });
-  _message_parser_factory->insert({ "BSON", std::make_shared<BSON_ParserCreator>() });
-  _message_parser_factory->insert(
-      { "MessagePack", std::make_shared<MessagePack_ParserCreator>() });
+  auto json_parser = std::make_shared<JSON_ParserFactory>();
+  _parser_factories.insert({ json_parser->encoding(), json_parser });
+
+  auto cbor_parser = std::make_shared<CBOR_ParserFactory>();
+  _parser_factories.insert({ cbor_parser->encoding(), cbor_parser });
+
+  auto bson_parser = std::make_shared<BSON_ParserFactory>();
+  _parser_factories.insert({ bson_parser->encoding(), bson_parser });
+
+  auto msgpack = std::make_shared<MessagePack_ParserFactory>();
+  _parser_factories.insert({ msgpack->encoding(), msgpack });
 
   if (!_default_streamer.isEmpty())
   {
@@ -605,7 +618,16 @@ QStringList MainWindow::initializePlugins(QString directory_name)
 
     QPluginLoader pluginLoader(pluginsDir.absoluteFilePath(filename), this);
 
-    QObject* plugin = pluginLoader.instance();
+    QObject* plugin;
+    try
+    {
+      plugin = pluginLoader.instance();
+    }
+    catch (std::runtime_error& err)
+    {
+      qDebug() << QString("%1: skipping, because it threw the following exception: %2").arg(filename).arg(err.what());
+      continue;
+    }
     if (plugin && dynamic_cast<PlotJugglerPlugin*>(plugin))
     {
       auto class_name = pluginLoader.metaData().value("className").toString();
@@ -614,7 +636,7 @@ QStringList MainWindow::initializePlugins(QString directory_name)
       DataLoader* loader = qobject_cast<DataLoader*>(plugin);
       StatePublisher* publisher = qobject_cast<StatePublisher*>(plugin);
       DataStreamer* streamer = qobject_cast<DataStreamer*>(plugin);
-      MessageParserCreator* message_parser = qobject_cast<MessageParserCreator*>(plugin);
+      ParserFactoryPlugin* message_parser = qobject_cast<ParserFactoryPlugin*>(plugin);
       ToolboxPlugin* toolbox = qobject_cast<ToolboxPlugin*>(plugin);
 
       QString plugin_name;
@@ -738,7 +760,8 @@ QStringList MainWindow::initializePlugins(QString directory_name)
       }
       else if (message_parser)
       {
-        _message_parser_factory->insert(std::make_pair(plugin_name, message_parser));
+        _parser_factories.insert(
+            std::make_pair(message_parser->encoding(), message_parser));
       }
       else if (streamer)
       {
@@ -747,8 +770,6 @@ QStringList MainWindow::initializePlugins(QString directory_name)
           _default_streamer = plugin_name;
         }
         _data_streamer.insert(std::make_pair(plugin_name, streamer));
-
-        streamer->setAvailableParsers(_message_parser_factory);
 
         connect(streamer, &DataStreamer::closed, this,
                 [this]() { this->stopStreamingPlugin(); });
@@ -812,6 +833,17 @@ QStringList MainWindow::initializePlugins(QString directory_name)
       }
     }
   }
+
+  for (auto& [name, streamer] : _data_streamer)
+  {
+    streamer->setParserFactories(&_parser_factories);
+  }
+
+  for (auto& [name, loader] : _data_loader)
+  {
+    loader->setParserFactories(&_parser_factories);
+  }
+
   if (!_data_streamer.empty())
   {
     QSignalBlocker block(ui->comboStreaming);
@@ -1450,7 +1482,7 @@ std::unordered_set<std::string> MainWindow::loadDataFromFile(const FileLoadInfo&
     QString plugin_name =
         QInputDialog::getItem(this, tr("QInputDialog::getItem()"),
                               tr("Select the loader to use:"), names, 0, false, &ok);
-    if (ok && !plugin_name.isEmpty())
+    if (ok && !plugin_name.isEmpty() && (_enabled_plugins.size() == 0 || _enabled_plugins.contains(plugin_name)))
     {
       dataloader = _data_loader[plugin_name];
       last_plugin_name_used = plugin_name;
@@ -1781,6 +1813,27 @@ void MainWindow::updateReactivePlots()
       }
     }
   });
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent* event)
+{
+  if (event->mimeData()->hasUrls())
+  {
+    event->acceptProposedAction();
+  }
+}
+
+void MainWindow::dropEvent(QDropEvent* event)
+{
+  QStringList file_names;
+  const auto urls = event->mimeData()->urls();
+
+  for (const auto& url : urls)
+  {
+    file_names << QDir::toNativeSeparators(url.toLocalFile());
+  }
+
+  loadDataFromFiles(file_names);
 }
 
 void MainWindow::on_stylesheetChanged(QString theme)
@@ -2117,6 +2170,18 @@ bool MainWindow::loadLayoutFromFile(QString filename)
       }
     }
     _curvelist_widget->refreshColumns();
+  }
+
+  auto colormaps = root.firstChildElement("colorMaps");
+
+  if (!colormaps.isNull())
+  {
+    for (auto colormap = colormaps.firstChildElement("colorMap");
+         colormap.isNull() == false; colormap = colormap.nextSiblingElement("colorMap"))
+    {
+      QString name = colormap.attribute("name");
+      ColorMapLibrary()[name]->setScrip(colormap.text());
+    }
   }
 
   QByteArray snippets_saved_xml =
@@ -2669,6 +2734,7 @@ void MainWindow::onPlaybackLoop()
   //////////////////
   updatedDisplayTime();
   onUpdateLeftTableValues();
+  updateReactivePlots();
 
   for (auto& it : _state_publisher)
   {
@@ -2986,9 +3052,8 @@ void MainWindow::on_pushButtonSaveLayout_clicked()
   checkbox_datasource->setChecked(
       settings.value("MainWindow.saveLayoutDataSource", true).toBool());
 
-  auto checkbox_snippets = new QCheckBox("Save custom transformations");
-  checkbox_snippets->setToolTip("Do you want the layout to save the custom "
-                                "transformations?");
+  auto checkbox_snippets = new QCheckBox("Save Scripts (transforms and colormaps)");
+  checkbox_snippets->setToolTip("Do you want the layout to save your Lua scripts?");
   checkbox_snippets->setFocusPolicy(Qt::NoFocus);
   checkbox_snippets->setChecked(
       settings.value("MainWindow.saveLayoutSnippets", true).toBool());
@@ -3083,6 +3148,17 @@ void MainWindow::on_pushButtonSaveLayout_clicked()
     auto snipped_saved = GetSnippetsFromXML(snippets_xml_text);
     auto snippets_root = ExportSnippets(snipped_saved, doc);
     root.appendChild(snippets_root);
+
+    QDomElement color_maps = doc.createElement("colorMaps");
+    for (const auto& it : ColorMapLibrary())
+    {
+      QString colormap_name = it.first;
+      QDomElement colormap = doc.createElement("colorMap");
+      QDomText colormap_script = doc.createTextNode(it.second->script());
+      colormap.setAttribute("name", colormap_name);
+      colormap.appendChild(colormap_script);
+      color_maps.appendChild(colormap);
+    }
   }
   root.appendChild(doc.createComment(" - - - - - - - - - - - - - - "));
   //------------------------------------
@@ -3177,7 +3253,7 @@ void MainWindow::on_actionPreferences_triggered()
 
   QString theme = settings.value("Preferences::theme").toString();
 
-  if (theme != prev_style)
+  if (!theme.isEmpty() && theme != prev_style)
   {
     loadStyleSheet(tr(":/resources/stylesheet_%1.qss").arg(theme));
   }
