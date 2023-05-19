@@ -48,7 +48,7 @@ public:
 
   QDomElement xmlSaveState(QDomDocument& doc) const;
 
-  bool xmlLoadState(QDomElement& element);
+  bool xmlLoadState(QDomElement& element, bool autozoom = true);
 
   Range getVisualizationRangeY(Range range_X) const override;
 
@@ -87,6 +87,7 @@ protected:
 
   bool eventFilter(QObject* obj, QEvent* event) override;
   void onDragEnterEvent(QDragEnterEvent* event);
+  void onDragLeaveEvent(QDragLeaveEvent* event);
   void onDropEvent(QDropEvent* event);
 
   bool canvasEventFilter(QEvent* event);

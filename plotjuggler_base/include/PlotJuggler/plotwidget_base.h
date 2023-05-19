@@ -13,9 +13,9 @@
 
 class QwtPlot;
 class QwtPlotCurve;
-class QwtPlotPanner;
 class QwtPlotMarker;
 
+class PlotPanner;
 class PlotZoomer;
 class PlotMagnifier;
 class PlotLegend;
@@ -110,6 +110,7 @@ signals:
   void viewResized(const QRectF&);
 
   void dragEnterSignal(QDragEnterEvent* event);
+  void dragLeaveSignal(QDragLeaveEvent* event);
 
   void dropSignal(QDropEvent* event);
 

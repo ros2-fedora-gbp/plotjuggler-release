@@ -9,6 +9,8 @@
 
 using namespace PJ;
 
+class DateTimeHelp;
+
 class DataLoadCSV : public DataLoader
 {
   Q_OBJECT
@@ -48,10 +50,14 @@ private:
 
   QCSVHighlighter _csvHighlighter;
 
+  FileLoadInfo* _fileInfo;
+
   QDialog* _dialog;
   Ui::DialogCSV* _ui;
+  DateTimeHelp *_dateTime_dialog;
 
   QStandardItemModel *_model;
 
   bool multiple_columns_warning_ = true;
+
 };
